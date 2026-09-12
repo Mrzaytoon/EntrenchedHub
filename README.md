@@ -8,7 +8,9 @@ A client side aim and ESP hub for the Roblox game **ENTRENCHED** (place `3678761
 loadstring(game:HttpGet("https://raw.githubusercontent.com/Mrzaytoon/EntrenchedHub/main/EntrenchedHub.lua"))()
 ```
 
-Press **Right Shift** to hide and show the panel. Drag it by the header. The minus button collapses it to the title bar.
+Press **Right Shift** to hide and show the panel. **Hold Left Alt** to click anything in it. Drag it by the header, and the minus button collapses it to the title bar.
+
+The cursor is only released for as long as you hold Left Alt, so mouse look and shift lock are never taken away from you mid fight.
 
 ## How it works
 

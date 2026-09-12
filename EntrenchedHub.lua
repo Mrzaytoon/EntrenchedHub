@@ -155,9 +155,9 @@ local Cfg = {
         camFov    = 0,
     },
     ui = {
-        -- shipped ON so the panel is clickable out of the box. Turn it off if you
-        -- would rather keep mouse look while the panel is visible.
-        freeCursor = true,
+        -- OFF. Holding the cursor open permanently steals mouse look, which is
+        -- intolerable mid fight. Hold Left Alt instead to click the panel.
+        freeCursor = false,
         autoSave   = true,
     },
 }
@@ -1823,7 +1823,8 @@ mkSlider(pSet, "Field of view offset", -30, 40, function() return Cfg.view.camFo
 mkNote(pSet, "This is added on top of whatever the game wants the camera to be, so aiming and scoping keep working normally.")
 
 mkHeading(pSet, "Panel")
-mkToggle(pSet, "Free the cursor while panel is open", function() return Cfg.ui.freeCursor end,
+mkToggle(pSet, "Free the cursor while panel is open (hold Left Alt instead)",
+    function() return Cfg.ui.freeCursor end,
     function(v)
         Cfg.ui.freeCursor = v
         if Hub.updateCursor then Hub.updateCursor() end
@@ -1835,8 +1836,8 @@ mkToggle(pSet, "Auto save settings", function() return Cfg.ui.autoSave end,
         -- change that can never be recorded
         if Hub.saveCfg then Hub.saveCfg(true) end
     end)
-mkNote(pSet, "Right Shift hides and shows this window. The minus button in the header collapses it to the title bar. Drag the header to move it. Settings are written to EntrenchedHub_Config.json and reloaded automatically.")
-mkNote(pSet, "Turn the cursor option off if you would rather keep mouse look and shift lock while the panel is visible. The panel will not be clickable then.")
+mkNote(pSet, "Right Shift hides and shows this window. Hold Left Alt to click anything in it. The minus button in the header collapses it to the title bar. Drag the header to move it. Settings are written to EntrenchedHub_Config.json and reloaded automatically.")
+mkNote(pSet, "Leave this off. Hold Left Alt whenever you want to click the panel and the cursor is released only for as long as you hold it, so mouse look and shift lock are never taken away from you mid fight.")
 
 local statusRow = row(pSet, 34)
 local statusLbl = label(statusRow, "Target: none")
@@ -1849,6 +1850,7 @@ selectTab("Aim")
 -- 12. MINIMISE / VISIBILITY
 --========================================================================
 local minimised = false
+local altHeld = false
 local fullSize = root.Size
 
 minBtn.MouseButton1Click:Connect(function()
@@ -1865,6 +1867,24 @@ connect(UserInputService.InputBegan, function(input, gpe)
     if input.KeyCode == Enum.KeyCode.RightShift then
         ui.Enabled = not ui.Enabled
         if Hub.updateCursor then Hub.updateCursor() end
+    elseif input.KeyCode == Enum.KeyCode.LeftAlt then
+        altHeld = true
+        if Hub.updateCursor then Hub.updateCursor() end
+    end
+end)
+
+connect(UserInputService.InputEnded, function(input)
+    if input.KeyCode == Enum.KeyCode.LeftAlt then
+        altHeld = false
+        if Hub.updateCursor then Hub.updateCursor() end
+    end
+end)
+
+-- losing focus while Alt is down would otherwise strand the cursor
+connect(UserInputService.WindowFocusReleased, function()
+    if altHeld then
+        altHeld = false
+        if Hub.updateCursor then Hub.updateCursor() end
     end
 end)
 
@@ -1877,7 +1897,10 @@ local cursorBound = false
 local iconSaved = nil
 
 local function updateCursor()
-    local want = Cfg.ui.freeCursor and ui.Enabled and not minimised
+    -- Either the permanent option, or Left Alt held down. The hold is the normal
+    -- way to use this: the panel stays readable at all times and mouse look is
+    -- only surrendered for the moment you are actually clicking something.
+    local want = (Cfg.ui.freeCursor or altHeld) and ui.Enabled and not minimised
     if want and not cursorBound then
         cursorBound = true
         if iconSaved == nil then iconSaved = UserInputService.MouseIconEnabled end
