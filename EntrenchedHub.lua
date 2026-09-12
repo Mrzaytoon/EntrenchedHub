@@ -1735,17 +1735,8 @@ local pAim = pages["Aim"]
 mkHeading(pAim, "Silent aim")
 mkToggle(pAim, "Silent aim", function() return Cfg.silent.enabled end,
     function(v) Cfg.silent.enabled = v end)
-mkToggle(pAim, "Fabricate hit list", function() return Cfg.silent.fabricate end,
-    function(v) Cfg.silent.fabricate = v end)
-mkToggle(pAim, "Ignore line of sight", function() return Cfg.silent.wallbang end,
-    function(v)
-        Cfg.silent.wallbang = v
-        if v then Cfg.silent.fabricate = true end
-    end)
-mkSlider(pAim, "Hit stacking", 1, 8, function() return Cfg.weapon.stackHits end,
-    function(v) Cfg.weapon.stackHits = v end, "x", 0)
-mkNote(pAim, "Hit stacking repeats each pellet in the reported hit list. Above 1x the client claims more hits than the weapon has pellets, which is the most obvious thing this hub can send. Leave it at 1 unless you are testing.")
-mkNote(pAim, "Silent aim alone redirects the shot through the game's own code, so every value it reports stays consistent. Fabricate is only needed for wallbang.")
+mkNote(pAim, "Silent aim redirects the shot through the game's own code, so the aim point, the hit list and the miss count all stay consistent with one another.")
+mkNote(pAim, "Wallbang is not possible in this game and the controls for it have been removed. Measured directly: 4 shots were sent with a fabricated hit list naming a real enemy head while the aim point was pointed at empty sky, and not one registered, against 72 hits and 39 kills over 238 normal shots in the same session. The server ignores the client hit list and raycasts every shot itself from the camera to the aim point, so geometry in the way always stops it. The fabrication code is still present and can be switched on in EntrenchedHub_Config.json if the game ever changes.")
 
 mkHeading(pAim, "Aimbot")
 mkToggle(pAim, "Camera aimbot", function() return Cfg.aimbot.enabled end,

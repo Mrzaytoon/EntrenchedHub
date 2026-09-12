@@ -45,7 +45,7 @@ Most rifles do 75 base, so a head hit is 112.5 against 105 max health. That is w
 ## Notes
 
 - **Extended hit range is off by default and should stay off.** The game's own hit list builder at `WeaponModule:1379` has no team check, so raising the reporting range makes it report every ally your shot passes through and the server punishes you for the teamkill. The hub strips friendly entries before they are sent, but the feature buys very little because the server already resolves long range shots by itself.
-- **Wallbang is unproven.** There is no penetration model in this game at all, so it works by fabricating the hit list outright. Whether the server re-checks line of sight is not readable from the client and testing did not confirm it. Left off by default.
+- **Wallbang is not possible in this game.** It was measured rather than guessed: four shots were sent with a fabricated hit list naming a real enemy head while the aim point was aimed at empty sky, and none registered, against 72 hits and 39 kills over 238 normal shots in the same session. The server ignores the client hit list and raycasts every shot itself from the camera to the aim point, so anything in the way stops it. There is also no penetration model anywhere in the game. The controls have been removed; the code path remains and can be re-enabled in the config file if the game ever changes.
 - The only anti cheat in the client is movement related. Nothing watches aim, camera, ESP or hooks. The real risk is other players reporting you, so the defaults are deliberately restrained.
 
 ## Credits
