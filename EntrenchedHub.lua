@@ -3048,14 +3048,23 @@ do
     -- a short loop, and every original is restored the moment it turns off.
     ------------------------------------------------------------------------
     local saved = {}           -- instance -> { prop -> original }
-    local function remember(inst, prop)
-        saved[inst] = saved[inst] or {}
-        if saved[inst][prop] == nil then saved[inst][prop] = inst[prop] end
-    end
+    -- We only ever write `value`, so any other value found here is the game's
+    -- latest intent (a new map sets its own fog and haze) and becomes the
+    -- original that unload restores.
     local function force(inst, prop, value)
         if not inst or not inst.Parent then return end
-        remember(inst, prop)
-        if inst[prop] ~= value then pcall(function() inst[prop] = value end) end
+        local cur = inst[prop]
+        if cur ~= value then
+            saved[inst] = saved[inst] or {}
+            saved[inst][prop] = cur
+            pcall(function() inst[prop] = value end)
+        end
+    end
+    -- instances from a finished map are dropped rather than held forever
+    local function prune()
+        for inst in pairs(saved) do
+            if not inst.Parent then saved[inst] = nil end
+        end
     end
     local function restoreAll()
         for inst, props in pairs(saved) do
@@ -3067,6 +3076,7 @@ do
     end
 
     local function apply()
+        prune()
         for _, c in ipairs(Lighting:GetChildren()) do
             if c:IsA("Atmosphere") then
                 force(c, "Density", 0)
@@ -3078,7 +3088,12 @@ do
                 force(c, "TintColor", Color3.new(1, 1, 1))
             end
         end
-        if Lighting.FogEnd < 100000 then force(Lighting, "FogEnd", 100000) end
+        if Lighting.FogEnd < 100000 then
+            force(Lighting, "FogEnd", 100000)
+        elseif Lighting.FogEnd ~= 100000 and saved[Lighting] then
+            -- the map itself cleared the fog; nothing of ours to restore
+            saved[Lighting].FogEnd = nil
+        end
         for _, c in ipairs(workspace:GetChildren()) do
             if c:IsA("BasePart") and string.find(c.Name, "ParticleFollower") then
                 for _, d in ipairs(c:GetDescendants()) do
@@ -3248,6 +3263,18 @@ do
     UI.panelScreen   = UI.screen("ent_panel", 1000)
     UI.toastScreen   = UI.screen("ent_toasts", 1001)
 
+    -- a map change or a game reset must never strand the hub without a screen
+    for _, screen in ipairs({ UI.overlayScreen, UI.panelScreen, UI.toastScreen }) do
+        E.connect(screen.AncestryChanged, function()
+            if screen.Parent or not E.alive then return end
+            task.defer(function()
+                if E.alive and not screen.Parent then
+                    pcall(function() screen.Parent = hostParent() end)
+                end
+            end)
+        end)
+    end
+
     ------------------------------------------------------------------------
     -- Left Alt gate and the cursor. The game locks the cursor every frame;
     -- we only override that while Alt is held, and on release we stop writing
@@ -3255,36 +3282,57 @@ do
     -- what used to break shift lock.
     ------------------------------------------------------------------------
     local iconSaved = nil
+    local behaviourConn = nil
     local altListeners = {}
     function UI.onAlt(fn) altListeners[#altListeners + 1] = fn end
+
+    -- While the cursor is locked to screen centre, a click still lands on
+    -- whatever GUI sits under the crosshair. Without this, firing through the
+    -- panel would flip its controls and the panel would swallow the shot, so
+    -- buttons are only interactable while Alt is held. The state is REAPPLIED
+    -- rather than trusted: on every Alt change, whenever the window or pill
+    -- shows, and twice a second, so no path (minimise, a new map, a respawn)
+    -- can leave the panel dead.
+    function UI.syncInteract()
+        local on = UI.altHeld
+        for _, screen in ipairs({ UI.panelScreen, UI.toastScreen }) do
+            if screen.Parent then
+                for _, d in ipairs(screen:GetDescendants()) do
+                    if d:IsA("GuiButton") and d.Interactable ~= on then d.Interactable = on end
+                end
+            end
+        end
+    end
+
+    local function freeCursor()
+        if UIS.MouseBehavior ~= Enum.MouseBehavior.Default then
+            UIS.MouseBehavior = Enum.MouseBehavior.Default
+        end
+        if not UIS.MouseIconEnabled then UIS.MouseIconEnabled = true end
+    end
 
     local function setAlt(on)
         if UI.altHeld == on then return end
         UI.altHeld = on
         if on then
             iconSaved = UIS.MouseIconEnabled
-            E.bind("ENT_CURSOR", Enum.RenderPriority.Last.Value + 2, function()
-                if UIS.MouseBehavior ~= Enum.MouseBehavior.Default then
-                    UIS.MouseBehavior = Enum.MouseBehavior.Default
-                end
-                if not UIS.MouseIconEnabled then UIS.MouseIconEnabled = true end
+            E.bind("ENT_CURSOR", Enum.RenderPriority.Last.Value + 2, freeCursor)
+            -- a script that locks the cursor after our bind has run is undone
+            -- the moment it writes, not a frame later
+            if behaviourConn then behaviourConn:Disconnect() end
+            behaviourConn = UIS:GetPropertyChangedSignal("MouseBehavior"):Connect(function()
+                if UI.altHeld then freeCursor() end
             end)
+            freeCursor()
         else
             E.unbind("ENT_CURSOR")
+            if behaviourConn then behaviourConn:Disconnect() behaviourConn = nil end
             if iconSaved ~= nil then
                 pcall(function() UIS.MouseIconEnabled = iconSaved end)
                 iconSaved = nil
             end
         end
-        -- While the cursor is locked to screen centre, a click still lands on
-        -- whatever GUI sits under the crosshair. Without this, firing through
-        -- the panel would flip its controls and the panel would swallow the shot.
-        -- Buttons are only interactable while Alt is held.
-        for _, screen in ipairs({ UI.panelScreen, UI.toastScreen }) do
-            for _, d in ipairs(screen:GetDescendants()) do
-                if d:IsA("GuiButton") then d.Interactable = on end
-            end
-        end
+        UI.syncInteract()
         for _, fn in ipairs(altListeners) do E.try("alt listener", fn, on) end
     end
     UI.setAlt = setAlt
@@ -3293,18 +3341,42 @@ do
             if d:IsA("GuiButton") then d.Interactable = UI.altHeld end
         end)
     end
+    E.loop("interact sync", function()
+        UI.syncInteract()
+        return 0.5
+    end)
 
     -- belt and braces for handlers: true only for a genuine Alt click
     function UI.live() return UI.altHeld end
 
+    local focused = true
     E.connect(UIS.InputBegan, function(input)
-        if input.KeyCode == Enum.KeyCode.LeftAlt then setAlt(true) end
+        if input.KeyCode == Enum.KeyCode.LeftAlt then
+            focused = true
+            setAlt(true)
+        end
     end)
     E.connect(UIS.InputEnded, function(input)
         if input.KeyCode == Enum.KeyCode.LeftAlt then setAlt(false) end
     end)
-    E.connect(UIS.WindowFocusReleased, function() setAlt(false) end)
-    E.onUnload(function() setAlt(false) end)
+    E.connect(UIS.WindowFocused, function() focused = true end)
+    E.connect(UIS.WindowFocusReleased, function()
+        focused = false
+        setAlt(false)
+    end)
+    E.onUnload(function()
+        setAlt(false)
+        if behaviourConn then behaviourConn:Disconnect() behaviourConn = nil end
+    end)
+
+    -- A release the game never reported (a loading screen, a focus change, a
+    -- chat box) would otherwise leave the cursor free. This only ever turns Alt
+    -- OFF: turning it on still needs a real key press.
+    E.bind("ENT_ALTWATCH", Enum.RenderPriority.First.Value, function()
+        if UI.altHeld and (not focused or not UIS:IsKeyDown(Enum.KeyCode.LeftAlt)) then
+            setAlt(false)
+        end
+    end)
 
     ------------------------------------------------------------------------
     -- Pointer: one hit test per frame for everything that reacts to hover
@@ -3720,6 +3792,7 @@ do
         end
     end)
     UI.onAlt(function(on) if not on then drag = nil end end)
+    function UI.cancelDrag() drag = nil end
 
     function UI.placeInitial()
         local cam = workspace.CurrentCamera
@@ -5252,8 +5325,11 @@ do
         if notify("Press " .. keyLabel(key) .. " to show the panel") then hintShown = true end
     end
 
+    local hiddenAt = 0           -- os.clock() of the last hide, for the consistency check
+
     local function showWindow()
         if isOpen then return end
+        if UI.cancelDrag then UI.cancelDrag() end
         local rest = restSpot()
         restPos = rest
         isOpen = true
@@ -5269,14 +5345,17 @@ do
         -- reopened mid hide: the springs simply turn around with their momentum
         Anim.to(scaleObj, "Scale", s, "panel")
         Anim.to(holder, "Position", rest, "panel")
+        UI.syncInteract()
     end
 
     local function hideWindow(quiet, instant)
         if not isOpen then return end
+        if UI.cancelDrag then UI.cancelDrag() end
         restPos = restSpot()
         isOpen = false
         UI.panelOpen = false
         settleUntil = 0
+        hiddenAt = os.clock()
         openGen = openGen + 1
         local s = restingScale() * 0.94
         if instant then
@@ -5550,12 +5629,15 @@ do
         Anim.to(pillScale, "Scale", 1, "select")
         Anim.to(pill, "Position", UDim2.fromOffset(x, y), "panel")
         Anim.set(rim, "Transparency", UI.altHeld and RIM_LIVE or RIM_IDLE)
+        UI.syncInteract()
     end
 
+    local pillHiddenAt = 0
     local function hidePill()
         pillGen = pillGen + 1
         local gen = pillGen
         press = nil
+        pillHiddenAt = os.clock()
         Anim.to(pressScale, "Scale", 1, "press")
         Anim.to(pillScale, "Scale", 0.9, "collapse")
         task.delay(HIDE_AFTER, function()
@@ -5736,6 +5818,31 @@ do
     E.loop("pill status", function()
         if minimisedShown and pill.Visible then refresh(false) end
         return 0.2
+    end)
+
+    -- Consistency net. Whatever happens in between (a hide timer that never
+    -- landed, a map change mid animation), the surfaces always settle into
+    -- the state the flags describe: a hidden pill can never sit over the
+    -- window, and a restored window is always shown at full size.
+    E.loop("surface check", function()
+        local now = os.clock()
+        if not minimisedShown and pill.Visible and now - pillHiddenAt > 0.6 then
+            press = nil
+            pill.Visible = false
+        end
+        if minimisedShown and not pill.Visible then
+            showPill(restSpot())
+        end
+        if isOpen then
+            if not holder.Visible then holder.Visible = true end
+            if now > settleUntil then
+                local s = restingScale()
+                if math.abs(scaleObj.Scale - s) > 0.02 then Anim.to(scaleObj, "Scale", s, "panel") end
+            end
+        elseif holder.Visible and now - hiddenAt > 0.6 then
+            holder.Visible = false
+        end
+        return 0.5
     end)
 
     -- a saved minimised state is applied once the rest of the build has run,
