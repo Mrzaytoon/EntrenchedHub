@@ -3143,7 +3143,7 @@ do
     local UIS, LP = E.UIS, E.LP
     local cfg = E.cfg
 
-    local UI = { altHeld = false, hoverables = {}, tabs = {}, pages = {} }
+    local UI = { altHeld = false, clickable = false, hoverables = {}, tabs = {}, pages = {} }
     E.ui = UI
 
     ------------------------------------------------------------------------
@@ -3276,25 +3276,27 @@ do
     end
 
     ------------------------------------------------------------------------
-    -- Left Alt gate and the cursor. The game locks the cursor every frame;
-    -- we only override that while Alt is held, and on release we stop writing
-    -- so the game reclaims it next frame. Forcing a value back on release is
-    -- what used to break shift lock.
+    -- Left Alt and the cursor. The game locks the cursor in first person and
+    -- while aiming; we only override that while Alt is held, and on release we
+    -- stop writing so the game reclaims it next frame. Forcing a value back on
+    -- release is what used to break shift lock.
+    --
+    -- The panel is clickable whenever the cursor is really free: the game has
+    -- released it (third person, menus), or Alt is held. Only a LOCKED cursor
+    -- is blocked, because a click under lock lands on whatever GUI sits at
+    -- screen centre, so firing through the panel would flip its controls.
     ------------------------------------------------------------------------
     local iconSaved = nil
     local behaviourConn = nil
-    local altListeners = {}
+    local altListeners, clickListeners = {}, {}
     function UI.onAlt(fn) altListeners[#altListeners + 1] = fn end
+    function UI.onClickable(fn) clickListeners[#clickListeners + 1] = fn end
+    UI.clickable = false
 
-    -- While the cursor is locked to screen centre, a click still lands on
-    -- whatever GUI sits under the crosshair. Without this, firing through the
-    -- panel would flip its controls and the panel would swallow the shot, so
-    -- buttons are only interactable while Alt is held. The state is REAPPLIED
-    -- rather than trusted: on every Alt change, whenever the window or pill
-    -- shows, and twice a second, so no path (minimise, a new map, a respawn)
-    -- can leave the panel dead.
+    -- reapplied rather than trusted, so no path (minimise, a new map, a
+    -- respawn) can leave a button stuck in the wrong state
     function UI.syncInteract()
-        local on = UI.altHeld
+        local on = UI.clickable
         for _, screen in ipairs({ UI.panelScreen, UI.toastScreen }) do
             if screen.Parent then
                 for _, d in ipairs(screen:GetDescendants()) do
@@ -3304,6 +3306,26 @@ do
         end
     end
 
+    local function setClickable(on)
+        if UI.clickable == on then return end
+        UI.clickable = on
+        UI.syncInteract()
+        for _, fn in ipairs(clickListeners) do E.try("click listener", fn, on) end
+    end
+
+    -- the game's own cursor state; a lock that lasts a single frame (the game
+    -- reclaiming it right after Alt is released) never counts as free
+    local freeSince = nil
+    local function gameCursorFree()
+        if UI.altHeld then return false end        -- while held the value is ours
+        if UIS.MouseBehavior ~= Enum.MouseBehavior.Default then
+            freeSince = nil
+            return false
+        end
+        freeSince = freeSince or os.clock()
+        return os.clock() - freeSince >= 0.1
+    end
+
     local function freeCursor()
         if UIS.MouseBehavior ~= Enum.MouseBehavior.Default then
             UIS.MouseBehavior = Enum.MouseBehavior.Default
@@ -3311,10 +3333,12 @@ do
         if not UIS.MouseIconEnabled then UIS.MouseIconEnabled = true end
     end
 
+    local wasFree = false
     local function setAlt(on)
         if UI.altHeld == on then return end
-        UI.altHeld = on
         if on then
+            wasFree = gameCursorFree()
+            UI.altHeld = true
             iconSaved = UIS.MouseIconEnabled
             E.bind("ENT_CURSOR", Enum.RenderPriority.Last.Value + 2, freeCursor)
             -- a script that locks the cursor after our bind has run is undone
@@ -3325,20 +3349,23 @@ do
             end)
             freeCursor()
         else
+            UI.altHeld = false
             E.unbind("ENT_CURSOR")
             if behaviourConn then behaviourConn:Disconnect() behaviourConn = nil end
             if iconSaved ~= nil then
                 pcall(function() UIS.MouseIconEnabled = iconSaved end)
                 iconSaved = nil
             end
+            -- a cursor that was free before Alt stays clickable with no flicker
+            freeSince = wasFree and (os.clock() - 1) or nil
         end
-        UI.syncInteract()
+        setClickable(on or gameCursorFree())
         for _, fn in ipairs(altListeners) do E.try("alt listener", fn, on) end
     end
     UI.setAlt = setAlt
     for _, screen in ipairs({ UI.panelScreen, UI.toastScreen }) do
         E.connect(screen.DescendantAdded, function(d)
-            if d:IsA("GuiButton") then d.Interactable = UI.altHeld end
+            if d:IsA("GuiButton") then d.Interactable = UI.clickable end
         end)
     end
     E.loop("interact sync", function()
@@ -3346,8 +3373,7 @@ do
         return 0.5
     end)
 
-    -- belt and braces for handlers: true only for a genuine Alt click
-    function UI.live() return UI.altHeld end
+    function UI.live() return UI.clickable end
 
     local focused = true
     E.connect(UIS.InputBegan, function(input)
@@ -3369,13 +3395,14 @@ do
         if behaviourConn then behaviourConn:Disconnect() behaviourConn = nil end
     end)
 
-    -- A release the game never reported (a loading screen, a focus change, a
-    -- chat box) would otherwise leave the cursor free. This only ever turns Alt
-    -- OFF: turning it on still needs a real key press.
+    -- Every frame: a release the game never reported (a loading screen, a
+    -- focus change) turns Alt off, and clickable follows the real cursor.
+    -- This only ever turns Alt OFF; turning it on still needs a key press.
     E.bind("ENT_ALTWATCH", Enum.RenderPriority.First.Value, function()
         if UI.altHeld and (not focused or not UIS:IsKeyDown(Enum.KeyCode.LeftAlt)) then
             setAlt(false)
         end
+        setClickable(UI.altHeld or gameCursorFree())
     end)
 
     ------------------------------------------------------------------------
@@ -3411,7 +3438,7 @@ do
 
     E.bind("ENT_POINTER", Enum.RenderPriority.Input.Value + 1, function()
         local m = UI.mouse()
-        local live = UI.altHeld and UI.panelOpen
+        local live = UI.clickable and UI.panelOpen
         local keep = {}
         for _, h in ipairs(UI.hoverables) do
             local f = h.frame
@@ -3540,7 +3567,7 @@ do
         ZIndex = 6,
     })
     UI.hint = hint
-    UI.onAlt(function(on)
+    UI.onClickable(function(on)
         Anim.to(hint, "TextTransparency", on and 1 or 0, "fade")
     end)
 
@@ -3572,7 +3599,7 @@ do
             end,
         })
         b.Activated:Connect(function()
-            if UI.altHeld then E.try("header button", onClick) end
+            if UI.clickable then E.try("header button", onClick) end
         end)
         return b
     end
@@ -3712,7 +3739,7 @@ do
                 end)
             end,
         })
-        btn.Activated:Connect(function() if UI.altHeld then UI.select(name) end end)
+        btn.Activated:Connect(function() if UI.clickable then UI.select(name) end end)
         return page
     end
 
@@ -3757,7 +3784,7 @@ do
     ------------------------------------------------------------------------
     local drag
     header.InputBegan:Connect(function(input)
-        if input.UserInputType ~= Enum.UserInputType.MouseButton1 or not UI.altHeld then return end
+        if input.UserInputType ~= Enum.UserInputType.MouseButton1 or not UI.clickable then return end
         local m = UI.mouse()
         drag = { start = m, origin = holder.Position }
     end)
@@ -3791,7 +3818,7 @@ do
             end)
         end
     end)
-    UI.onAlt(function(on) if not on then drag = nil end end)
+    UI.onClickable(function(on) if not on then drag = nil end end)
     function UI.cancelDrag() drag = nil end
 
     function UI.placeInitial()
@@ -4088,7 +4115,7 @@ do
         end)
 
         btn.Activated:Connect(function()
-            if not UI.altHeld then return end
+            if not UI.clickable then return end
             local nv = not (E.get(path) == true)
             E.set(path, nv)
             if nv then
@@ -4213,7 +4240,7 @@ do
         end
 
         zone.InputBegan:Connect(function(input)
-            if input.UserInputType ~= Enum.UserInputType.MouseButton1 or not UI.altHeld then return end
+            if input.UserInputType ~= Enum.UserInputType.MouseButton1 or not UI.clickable then return end
             dragging = true
             Anim.to(knob, "Size", UDim2.fromOffset(16, 16), "toggle")
             apply(UI.mouse().X)
@@ -4232,7 +4259,7 @@ do
         E.connect(UIS.InputEnded, function(input)
             if input.UserInputType == Enum.UserInputType.MouseButton1 then release() end
         end)
-        UI.onAlt(function(on) if not on then release() end end)
+        UI.onClickable(function(on) if not on then release() end end)
 
         UI.hoverable(r, {
             enter = function() Anim.to(val, "TextColor3", T.text, "hover") end,
@@ -4288,7 +4315,7 @@ do
                 TextColor3 = T.dim,
                 ZIndex = 15,
             })
-            b.Activated:Connect(function() if UI.altHeld then E.set(path, o) end end)
+            b.Activated:Connect(function() if UI.clickable then E.set(path, o) end end)
             x = x + widths[i] + gap
         end
 
@@ -4349,7 +4376,7 @@ do
                 ZIndex = 13,
             }, box)
             UI.corner(b, T.radius.pill)
-            b.Activated:Connect(function() if UI.altHeld then E.set(path, item.name) end end)
+            b.Activated:Connect(function() if UI.clickable then E.set(path, item.name) end end)
         end
         local function paint(v, instant)
             local cx = centers[v] or D / 2
@@ -4397,7 +4424,7 @@ do
         E.watch(path, show)
 
         b.Activated:Connect(function()
-            if not UI.altHeld then return end
+            if not UI.clickable then return end
             capturing = path
             show(E.get(path))
         end)
@@ -4452,7 +4479,7 @@ do
             ZIndex = 13,
         })
         face.Activated:Connect(function()
-            if not UI.altHeld then return end
+            if not UI.clickable then return end
             -- press dip on the inner face, never UIScale inside a list
             Anim.set(face, "Size", UDim2.new(1, -4, 1, -3))
             Anim.to(face, "Size", UDim2.fromScale(1, 1), "toggle")
@@ -4911,7 +4938,7 @@ do
 
     -- Alt and click a card to put it away early
     E.connect(E.UIS.InputBegan, function(input)
-        if input.UserInputType ~= Enum.UserInputType.MouseButton1 or not UI.altHeld then return end
+        if input.UserInputType ~= Enum.UserInputType.MouseButton1 or not UI.clickable then return end
         local ok, err = pcall(function()
             local m = UI.mouse()
             for _, t in ipairs(live) do
@@ -5220,7 +5247,7 @@ do
         UI.toggle(b, "Kill feed", "ui.killFeed")
         UI.toggle(b, "Save settings automatically", "ui.autoSave")
 
-        local k = UI.section(settings, "Keys", "Hold Left Alt to use the cursor while the panel is open.")
+        local k = UI.section(settings, "Keys", "Click normally. When the game locks the cursor, hold Left Alt to free it.")
         UI.keybind(k, "Show or hide panel", "keys.panel")
         UI.keybind(k, "Toggle silent aim", "keys.silent")
         UI.keybind(k, "Toggle ESP", "keys.esp")
@@ -5249,8 +5276,8 @@ end
 -- ==== en_24_pill.lua ====
 -- en_24_pill: panel visibility, the minimised pill, and global keybinds.
 --
--- The window and the pill share one rule: nothing moves under the pointer
--- unless Left Alt is held. Show and hide are springs on the holder's UIScale
+-- The window and the pill share one rule: nothing reacts to the pointer
+-- while the game has the cursor locked. Show and hide are springs on the holder's UIScale
 -- and Position; the pill is not inside a list layout, so scaling it is safe.
 do
     local T, Anim, UI = E.T, E.Anim, E.ui
@@ -5628,7 +5655,7 @@ do
         end
         Anim.to(pillScale, "Scale", 1, "select")
         Anim.to(pill, "Position", UDim2.fromOffset(x, y), "panel")
-        Anim.set(rim, "Transparency", UI.altHeld and RIM_LIVE or RIM_IDLE)
+        Anim.set(rim, "Transparency", UI.clickable and RIM_LIVE or RIM_IDLE)
         UI.syncInteract()
     end
 
@@ -5710,14 +5737,14 @@ do
         if p.moved then
             local x, y = clampPill(p.goal.X, p.goal.Y)
             Anim.to(pill, "Position", UDim2.fromOffset(x, y), "panel")
-        elseif click and UI.altHeld and minimisedShown then
+        elseif click and UI.clickable and minimisedShown then
             UI.setMinimised(false)
         end
     end
 
     E.connect(hit.InputBegan, function(input)
         if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
-        if not (UI.altHeld and minimisedShown and pill.Visible) then return end
+        if not (UI.clickable and minimisedShown and pill.Visible) then return end
         local o = pill.Position
         local origin = Vector2.new(o.X.Offset, o.Y.Offset)
         press = { start = UI.mouse(), origin = origin, goal = origin, moved = false }
@@ -5726,7 +5753,7 @@ do
 
     E.connect(UIS.InputChanged, function(input)
         if not press or input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
-        if not UI.altHeld then endPress(false) return end
+        if not UI.clickable then endPress(false) return end
         local d = UI.mouse() - press.start
         if not press.moved then
             if d.Magnitude <= 4 then return end
@@ -5741,7 +5768,7 @@ do
         if input.UserInputType == Enum.UserInputType.MouseButton1 then endPress(true) end
     end)
 
-    UI.onAlt(function(on)
+    UI.onClickable(function(on)
         if not on then endPress(false) end
         -- the rim brightens while the pill can be clicked
         if pill.Visible then
@@ -5880,7 +5907,7 @@ do
         if E.toast then
             local key = E.cfg.keys.panel
             local keyText = (key == "None" or key == "") and "" or ("  " .. key .. " shows or hides the panel.")
-            E.toast("Entrenched is ready", "Hold Left Alt to click." .. keyText, "info")
+            E.toast("Entrenched is ready", "When the cursor is locked, hold Left Alt to click." .. keyText, "info")
         end
     end)
 
